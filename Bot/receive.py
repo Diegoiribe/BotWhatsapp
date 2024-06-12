@@ -1,177 +1,591 @@
-from flask import Flask, request, session
-from twilio.twiml.messaging_response import MessagingResponse
+import requests
+import json
+from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import re
 
 app = Flask(__name__)
 
+# Configura tu clave API de Gupshup
+API_KEY = 'o6botgtule9omsamb70z42udlyzp3cql'  # Reemplaza con tu clave API de Gupshup
+SOURCE_NUMBER = '5216675014303'  # Reemplaza con tu número registrado en Gupshup
 
-# Estructura para almacenar las citas
-appointments = []
+# Lista para almacenar las citas reservadas
+citas_reservadas = []
 
-# Horarios disponibles
-available_hours = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+# Diccionario para almacenar temporalmente la información del usuario
+usuario_info = {}
 
-@app.route('/receive', methods=['GET', 'POST'])
-def receive_message():
-    incoming_msg = request.values.get('Body', '').lower()
-    response = MessagingResponse()
-    message = response.message()
+cita = False
 
-    # Verificar si hay un estado guardado en la sesión, si no, establecer estado inicial
-    if 'estado' not in session:
-        session['estado'] = 'inicio'
-        # Mensaje introductorio
-        message.body(
-            "👋 ¡Hola! Bienvenido a nuestro sistema de citas de corte de cabello. "
-            "Puedes agendar una cita diciendo algo como 'cita de corte de cabello'. "
-            "También puedes ver tus reservas actuales diciendo 'reservas' o "
-            "consultar horarios disponibles diciendo 'horarios disponibles'. "
-            "Si en algún momento deseas salir del proceso, simplemente escribe 'salir'.\n\n"
-            "¿Cómo puedo ayudarte hoy? 😊\n\n"
-            "Opciones:\n1. Cita de Corte de Cabello\n2. Ver Reservas\n3. Horarios Disponibles\n4. Salir"
-        )
-        return str(response)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.json
+    print('Datos recibidos del webhook:', json.dumps(data, indent=4))
 
-    # Estado inicial de la conversación
-    if session['estado'] == 'inicio':
-        # Verificar si el usuario quiere salir del proceso
-        if 'salir' in incoming_msg or incoming_msg == '4':
-            message.body("👋 ¡Hasta luego! Si necesitas algo más, no dudes en contactarnos.")
-            session.clear()  # Limpiar la sesión
-        # Si el mensaje contiene palabras clave como 'cita', 'corte' o 'cabello'
-        elif re.search(r'\bcita\b|\bcorte\b|\bcabello\b', incoming_msg) or incoming_msg == '1':
-            response_text = get_closest_available_slot()
-            session['estado'] = 'esperando_confirmacion'  # Cambiar estado a 'esperando_confirmacion'
-            message.body(f"{response_text}\n\n¿Te parece bien esta hora? Responde con 'sí' o 'no'.")
-        # Si el mensaje contiene la palabra 'reservas'
-        elif 'reservas' in incoming_msg or incoming_msg == '2':
-            today = datetime.now().date()
-            todays_appointments = [appt for appt in appointments if appt.date() == today]
-            if todays_appointments:
-                response_text = "📅 **Citas para hoy:**\n" + "\n".join(appt.strftime('%I:%M %p') for appt in todays_appointments)
-            else:
-                response_text = "📅 **No hay citas para hoy.**"
-            message.body(response_text)
-        # Si el mensaje contiene 'horarios disponibles'
-        elif 'horarios' in incoming_msg or incoming_msg == '3':
-            response_text = get_available_slots()
-            message.body(response_text)
-        # Si el mensaje no coincide con ninguna de las opciones anteriores
-        else:
-            message.body(
-                "❓ **Lo siento, no entendí eso.** Intenta decir 'cita de corte de cabello', 'reservas', 'horarios disponibles' o proporciona una hora en el formato 'HH:MM AM/PM'.\n\n"
-                "Opciones:\n1. Cita de Corte de Cabello\n2. Ver Reservas\n3. Horarios Disponibles\n4. Salir\n\n"
-                "**Ejemplos válidos:**\n- 10:30 AM\n- 2:00 PM\n\n💡 **Nota:** Asegúrate de usar el formato de 12 horas con AM/PM."
-            )
-    
-    # Estado esperando confirmación del usuario
-    elif session['estado'] == 'esperando_confirmacion':
-        # Verificar si el usuario quiere salir del proceso
-        if 'salir' in incoming_msg or incoming_msg == '4':
-            message.body("👋 ¡Hasta luego! Si necesitas algo más, no dudes en contactarnos.")
-            session.clear()  # Limpiar la sesión
-        # Si el usuario responde 'no' o 'no gracias'
-        elif 'no' in incoming_msg:
-            message.body("🕒 **¿A qué hora te gustaría?** Por favor, proporciona la hora en el formato 'HH:MM AM/PM'.\n\n**Ejemplos válidos:**\n- 10:30 AM\n- 2:00 PM")
-            session['estado'] = 'esperando_hora'  # Cambiar estado a 'esperando_hora'
-        # Si el usuario responde 'sí', 'si', 'claro' o 'ok'
-        elif 'si' in incoming_msg or 'sí' in incoming_msg or 'claro' in incoming_msg or 'ok' in incoming_msg:
-            appointment_datetime_str = session.get('ultima_cita_sugerida', None)
-            if appointment_datetime_str:
-                appointment_datetime = datetime.strptime(appointment_datetime_str, '%d-%m-%Y a las %I:%M %p')
-                if appointment_datetime >= datetime.now():
-                    appointments.append(appointment_datetime)
-                    message.body(f"✅ **Tu cita para el {appointment_datetime_str} ha sido registrada.**")
-                    session['estado'] = 'inicio'  # Volver al estado inicial
-                    session.pop('ultima_cita_sugerida', None)
+    # Manejar solo eventos donde se recibe un mensaje de texto
+    if data.get('type') == 'message':
+        handle_message(data['payload'])
+        handle_postback(data['payload'])
+
+    return '', 204  # Responder con un status 204 No Content
+
+def set_cita_state(state):
+    global cita
+    cita = state
+
+def handle_message(payload):
+    if payload.get('type') == 'text' and 'payload' in payload:
+        inner_payload = payload['payload']
+        if 'text' in inner_payload:
+            from_number = payload['source']
+            message = inner_payload['text'].lower()
+            
+            if not cita:
+                match = re.match(r'(\d{4}-\d{1,2}-\d{1,2} \d{2}:\d{2}:\d{2})', message)
+                if match:
+                    date_str = match.group(1)
+                    print(f"Fecha detectada: {date_str}")  # Mensaje de depuración
+                    cita_a_eliminar = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                    delete_cita(from_number, cita_a_eliminar)
                 else:
-                    message.body("❌ **No se puede agendar una cita en el pasado.** Por favor, proporciona una nueva fecha y hora.")
-                    session['estado'] = 'esperando_hora'
-            else:
-                message.body("⚠️ **Hubo un error al registrar tu cita. Por favor, intenta nuevamente.**")
-                session['estado'] = 'inicio'
-        # Si la respuesta del usuario no es clara
-        else:
-            message.body("❓ **Lo siento, no entendí eso.** ¿Te parece bien la hora sugerida? Por favor responde con 'sí' o 'no'.")
-    
-    # Estado esperando que el usuario proporcione una hora específica
-    elif session['estado'] == 'esperando_hora':
-        # Verificar si el usuario quiere salir del proceso
-        if 'salir' in incoming_msg or incoming_msg == '4':
-            message.body("👋 ¡Hasta luego! Si necesitas algo más, no dudes en contactarnos.")
-            session.clear()  # Limpiar la sesión
-        else:
-            try:
-                preferred_time = datetime.strptime(incoming_msg, '%I:%M %p').time()
-                now = datetime.now()
-                if datetime.combine(now.date(), preferred_time) > now:
-                    response_text, new_appointment_datetime_str = get_first_available_day(preferred_time)
+                    send_welcome_message(from_number)
+            elif cita: 
+                match = re.match(r'(\d{4}-\d{1,2}-\d{1,2})', message)
+                if match:
+                    date_str = match.group(1)
+                    print(f"Fecha detectada: {date_str}")  # Mensaje de depuración
+                    fecha = datetime.strptime(date_str, '%Y-%m-%d').date()
+                    select_add_cita(from_number, fecha)
                 else:
-                    response_text, new_appointment_datetime_str = get_first_available_day(preferred_time, check_today=False)
-                message.body(f"{response_text}\n\n¿Te parece bien esta hora? Responde con 'sí' o 'no'.")
-                session['estado'] = 'esperando_confirmacion'  # Volver a esperar confirmación
-                session['ultima_cita_sugerida'] = new_appointment_datetime_str
-            except ValueError:
-                message.body("⚠️ **Formato de hora incorrecto.** Por favor, usa 'HH:MM AM/PM'.\n\n**Ejemplos válidos:**\n- 10:30 AM\n- 2:00 PM")
-                session['estado'] = 'esperando_hora'
+                    save_name(from_number, message)
 
-    return str(response)
+def handle_postback(payload):
+    if 'payload' in payload:
+        inner_payload = payload['payload']
+        if 'postbackText' in inner_payload:
+            postback_text = inner_payload['postbackText']
+            from_number = payload['source']
+            if postback_text == 'cita':
+                send_response_cita(from_number)
+            elif postback_text == 'agendar_cita':
+                add_cita(from_number)
+            elif postback_text == 'add_cita':
+                if from_number in usuario_info and 'time' in usuario_info[from_number]:
+                    select_name(from_number, usuario_info[from_number]['time'])
+            elif postback_text == 'otra_fecha':
+                another_date(from_number)
+            elif postback_text == 'hour':
+                check_hours(from_number, inner_payload['title'])
+            elif postback_text == 'seleccionar_fecha':
+                select_date(from_number)
+            elif postback_text == 'hour_select':
+                select_name(from_number, inner_payload['title'])
+            elif postback_text == 'cancelar_cita':
+                cancel_cita(from_number)
+            elif postback_text == 'mostrar_citas':
+                mostrar_citas_reservadas(from_number)
+            elif postback_text == 'contacto':
+                contact_menu(from_number)
+            elif postback_text == 'ubicacion':
+                send_location_message(from_number)
+            elif postback_text == 'kevin':
+                send_contact(from_number)
+            elif postback_text == 'salir':
+                send_welcome_message(from_number)
 
-def get_closest_available_slot():
-    today = datetime.now().date()
-    for days_ahead in range(7):  # Revisa los próximos 7 días
-        current_date = today + timedelta(days=days_ahead)
-        daily_appointments = [appt for appt in appointments if appt.date() == current_date]
+def send_welcome_message(to_number):
+    welcome_text = "¡Bienvenido! ¿Qué deseas hacer?"
+    options = [
+        {"title": "Agendar Cita", "postbackText": "cita"},
+        {"title": "Consultar", "postbackText": "mostrar_citas"},
+        {"title": "Contacto", "postbackText": "contacto"}
+    ]
+    set_cita_state(False)
+    send_quick_reply_message(to_number, options, welcome_text)
 
-        for hour in available_hours:
-            slot_datetime = datetime.combine(current_date, datetime.min.time()) + timedelta(hours=hour)
-            if slot_datetime not in daily_appointments and slot_datetime > datetime.now():
-                slot_datetime_str = slot_datetime.strftime('%d-%m-%Y a las %I:%M %p')
-                return f"📅 **La próxima cita disponible es el {slot_datetime_str}.**\n\n**¿Te parece bien esta hora?** Responde con 'sí' o 'no'."
+def send_response_cita(to_number):
+    options = [
+        {"title": "Seleccionar fecha", "postbackText": "seleccionar_fecha"},
+        {"title": "Cita rápida", "postbackText": "agendar_cita"},
+        {"title": "Salir", "postbackText": "salir"}
+    ]
+    send_quick_reply_message(to_number, options)
 
-    return "❌ **No hay horarios disponibles en los próximos 7 días.**"
+def add_cita(to_number):
+    set_cita_state(True)
+    next_appointment = get_next_available_appointment()
 
-def get_available_slots():
-    today = datetime.now().date()
-    available_slots = []
+    if to_number not in usuario_info:
+        usuario_info[to_number] = {}
+    
+    usuario_info[to_number]["next_appointment"] = next_appointment
+    usuario_info[to_number]["date"] = next_appointment.date()
+    usuario_info[to_number]["time"] = next_appointment.strftime('%I:%M %p')
 
-    for days_ahead in range(7):  # Revisa los próximos 7 días
-        current_date = today + timedelta(days=days_ahead)
-        daily_appointments = [appt for appt in appointments if appt.date() == current_date]
+    response_text = f"La cita más próxima es el {next_appointment.strftime('%d de %B a las %I:%M %p')}. ¿Deseas agendarla?"
+    options = [
+        {"title": "Sí", "postbackText": "add_cita"},
+        {"title": "Deseo otra fecha", "postbackText": "otra_fecha"},
+        {"title": "Salir", "postbackText": "salir"}
+    ]
 
-        for hour in available_hours:
-            slot_datetime = datetime.combine(current_date, datetime.min.time()) + timedelta(hours=hour)
-            if slot_datetime not in daily_appointments and slot_datetime > datetime.now():
-                available_slots.append(slot_datetime)
+    send_quick_reply_message(to_number, options, response_text)
 
-        if available_slots:
-            break
 
-    if available_slots:
-        response_text = "📅 **Horarios disponibles:**\n" + "\n".join(slot.strftime('%d-%m-%Y %I:%M %p') for slot in available_slots)
+
+def another_date(to_number):
+    response_text = "Indica la hora a la que deseas agendar la cita."
+    morning = [
+        {"id": 11, "title": "11:00 AM", "postbackText": "hour"},
+        {"id": 12, "title": "12:00 AM", "postbackText": "hour"},
+        {"id": 1, "title": "01:00 PM", "postbackText": "hour"},
+    ]
+
+    evening = [
+        {"id": 2, "title": "02:00 PM", "postbackText": "hour"},
+        {"id": 3, "title": "03:00 PM", "postbackText": "hour"},
+        {"id": 4, "title": "04:00 PM", "postbackText": "hour"},
+    ]
+
+    night = [
+        {"id": 5, "title": "05:00 PM", "postbackText": "hour"},
+        {"id": 6, "title": "06:00 PM", "postbackText": "hour"},
+        {"id": 7, "title": "07:00 PM", "postbackText": "hour"},
+    ]
+
+    sections = [
+        {"title": "Morning", "subtitle": "Choose a morning time", "options": morning},
+        {"title": "Evening", "subtitle": "Choose an evening time", "options": evening},
+        {"title": "Night", "subtitle": "Choose a night time", "options": night},
+    ]
+
+    send_list_message(to_number, sections, response_text)
+
+def extract_hour(title):
+    # Asumiendo que el título siempre está en el formato "HH:MM AM/PM"
+    hour, minute_period = title.split(':')
+    minute, period = minute_period.split(' ')
+    hour = int(hour)
+    
+    if period == 'PM' and hour != 12:
+        hour += 12
+    elif period == 'AM' and hour == 12:
+        hour = 0
+    
+    return hour
+
+def check_hours(to_number, title):
+    set_cita_state(True)
+    hour_selected = extract_hour(title)
+    end_hour = hour_selected + 1
+    next_appointment = get_next_available_appointment(hour_selected, end_hour)
+
+    if to_number not in usuario_info:
+        usuario_info[to_number] = {}
+
+    usuario_info[to_number]["next_appointment"] = next_appointment
+    usuario_info[to_number]["date"] = next_appointment.date()
+    usuario_info[to_number]["time"] = next_appointment.strftime('%I:%M %p')
+
+    response_text = f"La cita más próxima es el {next_appointment.strftime('%d de %B a las %I:%M %p')}. ¿Deseas agendarla?"
+
+    options = [
+        {"title": "Sí", "postbackText": "add_cita"},
+        {"title": "Deseo otra fecha", "postbackText": "otra_fecha"},
+        {"title": "Salir", "postbackText": "salir"}
+    ]
+
+    send_quick_reply_message(to_number, options, response_text)
+
+
+def get_booked_hours(date):
+    return [cita["date"].strftime('%I:%M %p') for cita in citas_reservadas if cita["date"].date() == date]
+
+def get_next_available_days(start_date, num_days=3):
+    available_days = []
+    current_date = start_date + timedelta(days=1)
+
+    while len(available_days) < num_days:
+        booked_hours = get_booked_hours(current_date)
+        if len(booked_hours) < 6:  # Suponiendo que hay 6 slots por día
+            available_days.append(current_date)
+        current_date += timedelta(days=1)
+    
+    return available_days
+
+def select_date(to_number):
+    set_cita_state(True)
+    send_response(to_number, "Indica la fecha de la cita que deseas agendar en el formato 'YYYY-MM-DD'.")
+
+def select_add_cita(to_number, date):
+    response_text = "El día {} está disponible, por favor selecciona la hora"
+    booked_hours = get_booked_hours(date)
+
+    # Opciones de horarios disponibles
+    all_hours = [
+        {"id": 11, "title": "11:00 AM", "postbackText": "hour_select"},
+        {"id": 12, "title": "12:00 PM", "postbackText": "hour_select"},
+        {"id": 13, "title": "01:00 PM", "postbackText": "hour_select"},
+        {"id": 14, "title": "02:00 PM", "postbackText": "hour_select"},
+        {"id": 15, "title": "03:00 PM", "postbackText": "hour_select"},
+        {"id": 16, "title": "04:00 PM", "postbackText": "hour_select"},
+        {"id": 17, "title": "05:00 PM", "postbackText": "hour_select"},
+        {"id": 18, "title": "06:00 PM", "postbackText": "hour_select"},
+        {"id": 19, "title": "07:00 PM", "postbackText": "hour_select"},
+    ]
+
+    # Filtrar las horas que ya están reservadas
+    available_hours = [slot for slot in all_hours if slot["title"] not in booked_hours]
+
+    # Dividir los horarios en secciones: mañana, tarde y noche
+    morning = [slot for slot in available_hours if 11 <= slot["id"] < 14]
+    evening = [slot for slot in available_hours if 14 <= slot["id"] < 17]
+    night = [slot for slot in available_hours if 17 <= slot["id"] < 20]
+
+    sections = [
+        {"title": "Morning", "subtitle": "Choose a morning time", "options": morning},
+        {"title": "Evening", "subtitle": "Choose an evening time", "options": evening},
+        {"title": "Night", "subtitle": "Choose a night time", "options": night},
+    ]
+
+    if morning or evening or night:
+        usuario_info[to_number] = {"date": date}  # Guardar la fecha temporalmente
+        send_list_message(to_number, sections, response_text.format(date))
     else:
-        response_text = "❌ **No hay horarios disponibles en los próximos 7 días.**"
+        next_days = get_next_available_days(date)
+        if next_days:
+            for day in next_days:
+                booked_hours = get_booked_hours(day)
+                available_hours = [slot for slot in all_hours if slot["title"] not in booked_hours]
 
-    return response_text
+                morning = [slot for slot in available_hours if 11 <= slot["id"] < 14]
+                evening = [slot for slot in available_hours if 14 <= slot["id"] < 17]
+                night = [slot for slot in available_hours if 17 <= slot["id"] < 20]
 
-def get_first_available_day(preferred_time, check_today=True):
-    today = datetime.now().date()
+                sections = [
+                    {"title": "Morning", "subtitle": "Choose a morning time", "options": morning},
+                    {"title": "Evening", "subtitle": "Choose an evening time", "options": evening},
+                    {"title": "Night", "subtitle": "Choose a night time", "options": night},
+                ]
+
+                if morning or evening or night:
+                    send_list_message(to_number, sections, f"El día {day} está disponible, por favor selecciona la hora")
+                    return  # Termina la función después de enviar el mensaje
+        else:
+            send_response(to_number, f"No hay horarios disponibles para el {date} ni en los próximos 3 días.")
+
+
+def select_name(to_number, time):
+    if to_number in usuario_info:
+        usuario_info[to_number]["time"] = time  # Guardar la hora temporalmente
+        send_response(to_number, "Por favor, indica tu nombre completo.")
+    else:
+        send_response(to_number, "Hubo un error en la selección de la hora. Por favor, empieza de nuevo.")
+
+def save_name(to_number, name):
+    if to_number in usuario_info:
+        usuario_info[to_number]["name"] = name
+        date = usuario_info[to_number]["date"]
+        time = usuario_info[to_number]["time"]
+        select_save_cita(to_number, date, time)
+    else:
+        send_response(to_number, "Hubo un error en la selección del nombre.")
+
+
+def select_save_cita(to_number, date, time):
+    name = usuario_info[to_number]["name"]
+    cita_datetime = datetime.combine(date, datetime.strptime(time, "%I:%M %p").time())
+    citas_reservadas.append({"date": cita_datetime, "time": time, "name": name})
+    send_response(to_number, f"¡Gracias {name}! Tu cita para el {date} a las {time} ha sido agendada.")
+    send_welcome_message(to_number)
+    usuario_info.pop(to_number, None)
+    
+
+def cancel_cita(to_number):
+    send_response(to_number, "Indica la fecha y hora de la cita que deseas cancelar.")
+
+def delete_cita(to_number, cita):
+    # Verifica si la cita está en la lista y la elimina
+    response_text = f"Cita para el {cita.strftime('%d de %B a las %H:%M')} eliminada."
+
+    for r_cita in citas_reservadas:
+        if r_cita["date"] == cita:
+            citas_reservadas.remove(r_cita)
+            send_response(to_number, response_text) 
+            return
+    
+    send_response(to_number, "La cita no se encuentra en la lista.") 
+
+def get_next_available_appointment(start_hour=11, end_hour=20):
     now = datetime.now()
-    for days_ahead in range(30):  # Revisa los próximos 30 días
-        current_date = today + timedelta(days=days_ahead)
-        daily_appointments = [appt for appt in appointments if appt.date() == current_date]
+    appointment_date = now
 
-        if check_today and current_date == today:
-            if preferred_time <= now.time():
-                continue
+    appointment_duration = timedelta(hours=1)
 
-        slot_datetime = datetime.combine(current_date, preferred_time)
-        if slot_datetime not in daily_appointments and slot_datetime > now:
-            slot_datetime_str = slot_datetime.strftime('%d-%m-%Y a las %I:%M %p')
-            return f"📅 **El primer día disponible para las {preferred_time.strftime('%I:%M %p')} es el {current_date.strftime('%d-%m-%Y')}.**\n\n**¿Te parece bien esta hora?**", slot_datetime_str
+    # Encuentra la próxima hora de cita disponible
+    while True:
+        if appointment_date.hour >= end_hour:
+            # Si es después del horario de citas, pasa al siguiente día
+            appointment_date += timedelta(days=1)
+            appointment_date = appointment_date.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        elif appointment_date.hour < start_hour:
+            # Si es antes del horario de citas, establece la hora de inicio
+            appointment_date = appointment_date.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        else:
+            # Incrementa una hora hasta encontrar una cita disponible
+            appointment_date = appointment_date.replace(minute=0, second=0, microsecond=0)
+            if all(r_cita["date"] != appointment_date for r_cita in citas_reservadas) and appointment_date > now:
+                break
+            appointment_date += appointment_duration
 
-    return "❌ **No hay horarios disponibles en los próximos 30 días para la hora solicitada.**", None
+    return appointment_date
+
+def mostrar_citas_reservadas(to_number):
+    if citas_reservadas:
+        response_text = "Citas reservadas:\n"
+        for cita in citas_reservadas:
+            date_str = cita["date"].strftime('%Y-%m-%d %I:%M %p')
+            response_text += f"- {date_str} para {cita['name']}\n"
+    else:
+        response_text = "No hay citas reservadas."
+    
+    send_response(to_number, response_text)
+
+def contact_menu(to_number):
+    options = [
+        {"title": "Contacto", "postbackText": "kevin"},
+        {"title": "Ubicacion", "postbackText": "ubicacion"},
+        {"title": "Salir", "postbackText": "salir"}
+    ]
+    send_quick_reply_message(to_number, options)
+
+
+
+def send_response(to_number, text):
+    url = "https://api.gupshup.io/sm/api/v1/msg"
+
+    payload = {
+        "channel": "whatsapp",
+        "source": SOURCE_NUMBER,
+        "destination": to_number,
+        "message": json.dumps({"type": "text", "text": text}),
+        "src.name": "myapp",
+        "disablePreview": False,
+        "encode": False
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "apikey": API_KEY
+    }
+
+    response = requests.post(url, data=payload, headers=headers)
+    print(f"Response for {to_number}: {response.text}")
+
+def send_quick_reply_message(to_number, options, text="¿Qué deseas hacer?"):
+    url = "https://api.gupshup.io/sm/api/v1/msg"
+
+    quick_reply_message = {
+        "type": "quick_reply",
+        "msgid": "qr1",
+        "content": {
+            "type": "text",
+            "header": "KevinStyle",
+            "text": text,
+            "caption": "Elige una de las siguientes opciones:"
+        },
+        "options": [
+            {
+                "type": "text",
+                "title": option["title"],
+                "postbackText": option["postbackText"]
+                
+            } for option in options
+        ]
+    }
+
+    payload = {
+        "channel": "whatsapp",
+        "source": SOURCE_NUMBER,
+        "destination": to_number,
+        "message": json.dumps(quick_reply_message),
+        "src.name": "myapp",
+        "disablePreview": False,
+        "encode": False
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "apikey": API_KEY
+    }
+
+    response = requests.post(url, data=payload, headers=headers)
+    print(f"Quick reply message response for {to_number}: {response.text}")
+
+def send_list_message(to_number, sections, text="¿Qué deseas hacer?"):
+    url = "https://api.gupshup.io/sm/api/v1/msg"
+
+    list_message = {
+        "type":"list",
+        "title":"KevinStyle",
+        "body":text,
+        "footer":"Elige una de las siguientes opciones:",
+        "msgid":"list1",
+        "globalButtons":[
+        {
+            "type":"text",
+            "title":"Global button"
+        }
+    ],
+    "items": [
+                {
+                    "title": section["title"],
+                    "subtitle": section["subtitle"],
+                    "options": [
+                        {
+                            "type": "text",
+                            "title": option["title"],
+                            "postbackText": option["postbackText"]
+                        } for option in section["options"]
+                    ]
+                } for section in sections
+            ]
+    }
+    
+    payload = {
+        "channel": "whatsapp",
+        "source": SOURCE_NUMBER,
+        "destination": to_number,
+        "message": json.dumps(list_message),
+        "src.name": "myapp",
+        "disablePreview": False,
+        "encode": False
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "apikey": API_KEY
+    }
+
+    response = requests.post(url, data=payload, headers=headers)
+    print(f"Quick reply message response for {to_number}: {response.text}")
+
+def send_contact(to_number):
+    url = "https://api.gupshup.io/sm/api/v1/msg"
+
+    contact = {
+        "type":"contact",
+        "contact":{
+            "addresses":[
+            {
+            "city":"Menlo Park",
+            "country":"United States",
+            "countryCode":"us",
+            "state":"CA",
+            "street":"1 Hacker Way",
+            "type":"HOME",
+            "zip":"94025"
+            },
+            {
+            "city":"Menlo Park",
+            "country":"United States",
+            "countryCode":"us",
+            "state":"CA",
+            "street":"200 Jefferson Dr",
+            "type":"WORK",
+            "zip":"94025"
+            }
+            ],
+            "birthday":"1995-08-18",
+            "emails":
+            [
+            {
+            "email":"personal.mail@gupshup.io",
+            "type":"Personal"
+            },
+            {
+            "email":"devsupport@gupshup.io",
+            "type":"Work"
+            }
+        ],
+        "name":{
+            "firstName":"Kevin",
+            "formattedName":"Style",
+            "lastName":"Style"
+        },
+        "org":{
+            "company":"Guspshup",
+            "department":"Product",
+            "title":"Manager"
+        },
+        "phones":[
+            {
+            "phone":"+1 (940) 555-1234",
+            "type":"HOME"
+            },
+            {
+            "phone":"+1 (650) 555-1234",
+            "type":"WORK",
+            "wa_id":"16505551234"
+            }
+        ],
+        "urls":[
+            {
+            "url":"https://www.gupshup.io",
+            "type":"WORK"
+            }
+        ]
+    }
+    }
+
+
+    payload = {
+        "channel": "whatsapp",
+        "source": SOURCE_NUMBER,
+        "destination": to_number,
+        "message": json.dumps(contact),
+        "src.name": "myapp",
+        "disablePreview": False,
+        "encode": False
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "apikey": API_KEY
+    }
+
+    response = requests.post(url, data=payload, headers=headers)
+    print(f"Quick reply message response for {to_number}: {response.text}")
+
+def send_location_message(to_number):
+    url = "https://api.gupshup.io/sm/api/v1/msg"
+
+    location_message = {
+   "type":"location",
+   "longitude":72.877655,
+   "latitude":19.075983,
+   "name":"Mumbai",
+   "address":"Mumbai, Maharashtra"
+}
+    
+    payload = {
+        "channel": "whatsapp",
+        "source": SOURCE_NUMBER,
+        "destination": to_number,
+        "message": json.dumps(location_message),
+        "src.name": "myapp",
+        "disablePreview": False,
+        "encode": False
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "apikey": API_KEY
+    }
+
+    response = requests.post(url, data=payload, headers=headers)
+    print(f"Quick reply message response for {to_number}: {response.text}")
 
 if __name__ == '__main__':
-    app.run(port=5000)
+    app.run(port=5000, debug=True)

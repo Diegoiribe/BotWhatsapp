@@ -1,0 +1,9 @@
+flask == 2.2.0
+python-dotenv
+flask-restful
+flask_sqlalchemy==2.5.1
+flask-jwt-extended
+flask-mail
+flask-cors
+flask-login
+SQLAlchemy==1.4.23
