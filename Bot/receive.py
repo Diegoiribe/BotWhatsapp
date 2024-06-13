@@ -18,6 +18,34 @@ usuario_info = {}
 
 cita = False
 
+API_URL = "http://127.0.0.1:6000/usuarios"  # URL de tu API
+
+def cargar_citas_desde_api():
+    try:
+        response = requests.get(API_URL)
+        if response.status_code == 200:
+            global citas_reservadas
+            citas_reservadas = response.json()
+            print("Citas cargadas exitosamente desde la API")
+        else:
+            print(f"Error al cargar citas desde la API: {response.status_code}, {response.text}")
+    except Exception as e:
+        print(f"Excepción al cargar citas desde la API: {e}")
+
+@app.before_request
+def before_request():
+    if not hasattr(app, 'before_first_request_handled'):
+        cargar_citas_desde_api()
+        app.before_first_request_handled = True
+
+@app.route('/', methods=['GET'])
+def home():
+    return "Servidor funcionando correctamente"
+
+@app.route('/webhook', methods=['GET'])
+def webhook_get():
+    return 'Método no permitido', 405
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
@@ -132,8 +160,6 @@ def add_cita(to_number):
 
     send_quick_reply_message(to_number, options, response_text)
 
-
-
 def another_date(to_number):
     response_text = "Indica la hora a la que deseas agendar la cita."
     morning = [
@@ -197,7 +223,6 @@ def check_hours(to_number, title):
     ]
 
     send_quick_reply_message(to_number, options, response_text)
-
 
 def get_booked_hours(date):
     return [cita["date"].strftime('%I:%M %p') for cita in citas_reservadas if cita["date"].date() == date]
@@ -275,7 +300,6 @@ def select_add_cita(to_number, date):
         else:
             send_response(to_number, f"No hay horarios disponibles para el {date} ni en los próximos 3 días.")
 
-
 def select_name(to_number, time):
     if to_number in usuario_info:
         usuario_info[to_number]["time"] = time  # Guardar la hora temporalmente
@@ -292,15 +316,24 @@ def save_name(to_number, name):
     else:
         send_response(to_number, "Hubo un error en la selección del nombre.")
 
+def enviar_cita_a_api(cita):
+    try:
+        response = requests.post(API_URL, json=cita, headers={"Content-Type": "application/json"})
+        if response.status_code == 200:
+            print("Cita enviada exitosamente a la API")
+        else:
+            print(f"Error al enviar la cita a la API: {response.status_code}, {response.text}")
+    except Exception as e:
+        print(f"Excepción al enviar la cita a la API: {e}")
 
 def select_save_cita(to_number, date, time):
     name = usuario_info[to_number]["name"]
     cita_datetime = datetime.combine(date, datetime.strptime(time, "%I:%M %p").time())
     citas_reservadas.append({"date": cita_datetime, "time": time, "name": name})
+    enviar_cita_a_api({"telephone": to_number ,"date": cita_datetime.isoformat(), "time": time, "name": name})
     send_response(to_number, f"¡Gracias {name}! Tu cita para el {date} a las {time} ha sido agendada.")
     send_welcome_message(to_number)
     usuario_info.pop(to_number, None)
-    
 
 def cancel_cita(to_number):
     send_response(to_number, "Indica la fecha y hora de la cita que deseas cancelar.")
@@ -359,8 +392,6 @@ def contact_menu(to_number):
         {"title": "Salir", "postbackText": "salir"}
     ]
     send_quick_reply_message(to_number, options)
-
-
 
 def send_response(to_number, text):
     url = "https://api.gupshup.io/sm/api/v1/msg"
@@ -588,4 +619,5 @@ def send_location_message(to_number):
     print(f"Quick reply message response for {to_number}: {response.text}")
 
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
+    print("Servidor iniciado")
