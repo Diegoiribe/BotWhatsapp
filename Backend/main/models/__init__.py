@@ -1,1 +1,0 @@
-from .Usuario import Usuario as UsuarioModel
