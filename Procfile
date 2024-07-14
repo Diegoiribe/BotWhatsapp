@@ -1,1 +1,1 @@
-web: gunicorn Bot.receive:app
+web: gunicorn app:app
