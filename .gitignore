@@ -2,9 +2,4 @@
 /Bot/Include
 /Bot/Lib
 /Bot/Scripts
-/Backend/pyvenv.cfg
-/Backend/Include
-/Backend/Lib
-/Backend/Scripts
-/Backend/.env
 .gitignore
