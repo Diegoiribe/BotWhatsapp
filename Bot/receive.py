@@ -69,6 +69,7 @@ def handle_message(payload):
             from_number = payload['source']
             message = inner_payload['text'].lower()
             
+            
             if not cita:
                 match = re.match(r'(\d{4}-\d{1,2}-\d{1,2} \d{2}:\d{2}:\d{2})', message)
                 if match:
@@ -112,7 +113,7 @@ def handle_postback(payload):
             elif postback_text == 'cancelar_cita':
                 cancel_cita(from_number)
             elif postback_text == 'mostrar_citas':
-                mostrar_citas_reservadas(from_number)
+                send_response_consultar(from_number)
             elif postback_text == 'contacto':
                 contact_menu(from_number)
             elif postback_text == 'ubicacion':
@@ -136,6 +137,14 @@ def send_response_cita(to_number):
     options = [
         {"title": "Seleccionar fecha", "postbackText": "seleccionar_fecha"},
         {"title": "Cita rápida", "postbackText": "agendar_cita"},
+        {"title": "Salir", "postbackText": "salir"}
+    ]
+    send_quick_reply_message(to_number, options)
+
+def send_response_consultar(to_number):
+    options = [
+        {"title": "Cancelar cita", "postbackText": "cancelar_cita"},
+        {"title": "Consultar cita", "postbackText": "consultar_cita"},
         {"title": "Salir", "postbackText": "salir"}
     ]
     send_quick_reply_message(to_number, options)
@@ -357,17 +366,48 @@ def select_save_cita(to_number, date, time):
 def cancel_cita(to_number):
     send_response(to_number, "Indica la fecha y hora de la cita que deseas cancelar.")
 
-def delete_cita(to_number, cita):
-    # Verifica si la cita está en la lista y la elimina
-    response_text = f"Cita para el {cita.strftime('%d de %B a las %H:%M')} eliminada."
+def delete_cita(to_number, cita_datetime):
+    try:
+        # Convertir el objeto datetime a cadenas de fecha y hora
+        date_str = cita_datetime.strftime('%Y-%m-%d')
+        time_str = cita_datetime.strftime('%H:%M:%S')
 
-    for r_cita in citas_reservadas:
-        if r_cita["date"] == cita:
-            citas_reservadas.remove(r_cita)
-            send_response(to_number, response_text) 
-            return
-    
-    send_response(to_number, "La cita no se encuentra en la lista.") 
+        # Crear los datos para la solicitud GET
+        params = {
+            "telephone": to_number,
+            "date": date_str,
+            "time": time_str
+        }
+
+        # Realizar la solicitud GET a la API para buscar el usuario
+        response = requests.get('https://botwhatsappapi-production.up.railway.app/usuarios', params=params)
+        
+        # Comprobar si la solicitud fue exitosa
+        if response.status_code == 200:
+            usuarios = response.json().get('usuarios', [])
+            
+            if usuarios:
+                # Asumiendo que solo hay un usuario que coincide con los criterios
+                usuario = usuarios[0]
+                user_id = usuario['id']
+                
+                # Realizar la solicitud DELETE a la API con el ID del usuario
+                delete_response = requests.delete(f'https://botwhatsappapi-production.up.railway.app/usuario/{user_id}')
+                
+                if delete_response.status_code == 204:
+                    response_text = f"Cita para el {cita_datetime.strftime('%d de %B a las %H:%M')} eliminada."
+                    send_response(to_number, response_text)
+                else:
+                    send_response(to_number, f'Error al eliminar la cita: {delete_response.status_code} - {delete_response.text}')
+            else:
+                send_response(to_number, 'No se encontró una cita que coincida con los detalles proporcionados.')
+        else:
+            send_response(to_number, f'Error al buscar la cita: {response.status_code} - {response.text}')
+
+    except requests.exceptions.RequestException as e:
+        send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
+    except Exception as e:
+        send_response(to_number, f'Ocurrió un error inesperado: {e}')
 
 def get_next_available_appointment(start_hour=11, end_hour=20):
     now = datetime.now()
