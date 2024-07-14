@@ -18,7 +18,7 @@ usuario_info = {}
 
 cita = False
 
-API_URL = "http://127.0.0.1:6000/usuarios"  # URL de tu API
+
 
 def cargar_citas_desde_api():
     try:
@@ -316,23 +316,42 @@ def save_name(to_number, name):
     else:
         send_response(to_number, "Hubo un error en la selección del nombre.")
 
-def enviar_cita_a_api(cita):
-    try:
-        response = requests.post(API_URL, json=cita, headers={"Content-Type": "application/json"})
-        if response.status_code == 200:
-            print("Cita enviada exitosamente a la API")
-        else:
-            print(f"Error al enviar la cita a la API: {response.status_code}, {response.text}")
-    except Exception as e:
-        print(f"Excepción al enviar la cita a la API: {e}")
-
 def select_save_cita(to_number, date, time):
+    if to_number not in usuario_info:
+        send_response(to_number, "Número de teléfono no encontrado.")
+        return
+
     name = usuario_info[to_number]["name"]
     cita_datetime = datetime.combine(date, datetime.strptime(time, "%I:%M %p").time())
     citas_reservadas.append({"date": cita_datetime, "time": time, "name": name})
-    enviar_cita_a_api({"telephone": to_number ,"date": cita_datetime.isoformat(), "time": time, "name": name})
-    send_response(to_number, f"¡Gracias {name}! Tu cita para el {date} a las {time} ha sido agendada.")
-    send_welcome_message(to_number)
+
+    time_24hr = datetime.strptime(time, "%I:%M %p").strftime("%H:%M:%S")
+
+    datos = {
+        "name": name,
+        "telephone": to_number,  # Número de teléfono como cadena
+        "date": date.isoformat().split('T')[0],  # Solo la parte de la fecha
+        "time": time_24hr
+    }
+
+    send_response(to_number, f"Sending data: {datos}")  # Imprimir los datos para debugging
+
+    try:
+        response = requests.post('https://botwhatsappapi-production.up.railway.app/usuarios', json=datos)
+        
+        # Comprobar si la respuesta es exitosa
+        if response.status_code in [200, 201]:
+            send_response(to_number, 'Datos enviados correctamente')
+            send_response(to_number, f"¡Gracias {name}! Tu cita para el {date} a las {time} ha sido agendada.")
+            send_welcome_message(to_number)
+        else:
+            send_response(to_number, f'Error al enviar datos: {response.status_code} - {response.text}')
+        
+    except requests.exceptions.RequestException as e:
+        send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
+    except Exception as e:
+        send_response(to_number, f'Ocurrió un error inesperado: {e}')
+
     usuario_info.pop(to_number, None)
 
 def cancel_cita(to_number):
@@ -375,15 +394,54 @@ def get_next_available_appointment(start_hour=11, end_hour=20):
     return appointment_date
 
 def mostrar_citas_reservadas(to_number):
-    if citas_reservadas:
-        response_text = "Citas reservadas:\n"
-        for cita in citas_reservadas:
-            date_str = cita["date"].strftime('%Y-%m-%d %I:%M %p')
-            response_text += f"- {date_str} para {cita['name']}\n"
-    else:
-        response_text = "No hay citas reservadas."
-    
-    send_response(to_number, response_text)
+    try:
+        citas_reservadas = []
+        page = 1
+
+        while True:
+            # Realizar la solicitud GET a la API para la página actual
+            response = requests.get(f'https://botwhatsappapi-production.up.railway.app/usuarios?page={page}')
+
+            # Comprobar si la solicitud fue exitosa
+            if response.status_code == 200:
+                data = response.json()
+
+                # Obtener la lista de usuarios en la página actual
+                current_page_citas = data.get('usuarios', [])
+                citas_reservadas.extend(current_page_citas)
+
+                # Comprobar si hay más páginas
+                if page >= data.get('pages', 1):
+                    break
+
+                page += 1
+            else:
+                send_response(to_number, f'Error al obtener citas: {response.status_code} - {response.text}')
+                return
+
+        # Imprimir la respuesta para depuración
+        print(citas_reservadas)
+
+        if citas_reservadas:
+            response_text = "Citas reservadas:\n"
+            for cita in citas_reservadas:
+                # Asegurarse de que los campos existen en el diccionario
+                if all(key in cita for key in ("date", "time", "name")):
+                    # Convertir fecha y hora a formato de texto
+                    date_str = cita['date'].split('T')[0] + " " + datetime.strptime(cita['time'], '%H:%M:%S').strftime('%I:%M %p')
+                    response_text += f"- {date_str} para {cita['name']}\n"
+                else:
+                    response_text += "Datos incompletos en una cita reservada.\n"
+        else:
+            response_text = "No hay citas reservadas."
+
+        send_response(to_number, response_text)
+
+    except requests.exceptions.RequestException as e:
+        send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
+    except Exception as e:
+        send_response(to_number, f'Ocurrió un error inesperado: {e}')
+
 
 def contact_menu(to_number):
     options = [
