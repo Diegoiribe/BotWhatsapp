@@ -18,7 +18,7 @@ usuario_info = {}
 
 cita = False
 
-
+API_URL = 'https://botwhatsappapi-production.up.railway.app/usuarios'
 
 def cargar_citas_desde_api():
     try:
@@ -61,6 +61,8 @@ def webhook():
 def set_cita_state(state):
     global cita
     cita = state
+
+
 
 def handle_message(payload):
     if payload.get('type') == 'text' and 'payload' in payload:
@@ -114,6 +116,8 @@ def handle_postback(payload):
                 cancel_cita(from_number)
             elif postback_text == 'mostrar_citas':
                 send_response_consultar(from_number)
+            elif postback_text == 'consultar_cita':
+                send_consultar_cita(from_number)
             elif postback_text == 'contacto':
                 contact_menu(from_number)
             elif postback_text == 'ubicacion':
@@ -131,6 +135,7 @@ def send_welcome_message(to_number):
         {"title": "Contacto", "postbackText": "contacto"}
     ]
     set_cita_state(False)
+    
     send_quick_reply_message(to_number, options, welcome_text)
 
 def send_response_cita(to_number):
@@ -142,6 +147,7 @@ def send_response_cita(to_number):
     send_quick_reply_message(to_number, options)
 
 def send_response_consultar(to_number):
+    
     options = [
         {"title": "Cancelar cita", "postbackText": "cancelar_cita"},
         {"title": "Consultar cita", "postbackText": "consultar_cita"},
@@ -149,8 +155,62 @@ def send_response_consultar(to_number):
     ]
     send_quick_reply_message(to_number, options)
 
+def send_consultar_cita(to_number):
+    try:
+        citas_reservadas = []
+        page = 1
+        current_date = datetime.now()
+
+        while True:
+            # Realizar la solicitud GET a la API para la página actual
+            response = requests.get(f'https://botwhatsappapi-production.up.railway.app/usuarios?page={page}')
+
+            # Comprobar si la solicitud fue exitosa
+            if response.status_code == 200:
+                data = response.json()
+
+                # Obtener la lista de usuarios en la página actual
+                current_page_citas = data.get('usuarios', [])
+                citas_reservadas.extend(current_page_citas)
+
+                # Comprobar si hay más páginas
+                if page >= data.get('pages', 1):
+                    break
+
+                page += 1
+            else:
+                send_response(to_number, f'Error al obtener citas: {response.status_code} - {response.text}')
+                return
+
+        # Filtrar las citas para el número de teléfono dado y que sean futuras
+        citas_proximas = []
+        for cita in citas_reservadas:
+            if cita['telephone'] == to_number:
+                # Analizar la fecha y hora desde el campo 'date' que ya incluye la hora
+                cita_datetime = datetime.strptime(cita['date'], '%Y-%m-%dT%H:%M:%S')
+                if cita_datetime >= current_date:
+                    citas_proximas.append(cita)
+
+        if citas_proximas:
+            response_text = "Citas próximas:\n"
+            for cita in citas_proximas:
+                # Formatear la fecha y hora a texto
+                cita_datetime = datetime.strptime(cita['date'], '%Y-%m-%dT%H:%M:%S')
+                date_str = cita_datetime.strftime('%d de %B a las %I:%M %p')
+                response_text += f"- {date_str} para {cita['name']}\n"
+        else:
+            response_text = "No tienes citas próximas registradas."
+
+        send_response(to_number, response_text)
+
+    except requests.exceptions.RequestException as e:
+        send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
+    except Exception as e:
+        send_response(to_number, f'Ocurrió un error inesperado: {e}')
+
 def add_cita(to_number):
     set_cita_state(True)
+    
     next_appointment = get_next_available_appointment()
 
     if to_number not in usuario_info:
@@ -212,6 +272,7 @@ def extract_hour(title):
 
 def check_hours(to_number, title):
     set_cita_state(True)
+    
     hour_selected = extract_hour(title)
     end_hour = hour_selected + 1
     next_appointment = get_next_available_appointment(hour_selected, end_hour)
@@ -250,6 +311,7 @@ def get_next_available_days(start_date, num_days=3):
 
 def select_date(to_number):
     set_cita_state(True)
+    
     send_response(to_number, "Indica la fecha de la cita que deseas agendar en el formato 'YYYY-MM-DD'.")
 
 def select_add_cita(to_number, date):
