@@ -3,6 +3,7 @@ import json
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import re
+import pytz
 
 app = Flask(__name__)
 
@@ -20,17 +21,53 @@ cita = False
 
 API_URL = 'https://botwhatsappapi-production.up.railway.app/usuarios'
 
+def time_to_int(time_str):
+    """Convert time in HH:MM:SS format to integer HHMM."""
+    time_obj = datetime.strptime(time_str, '%H:%M:%S').time()
+    return time_obj.hour * 100 + time_obj.minute
+
 def cargar_citas_desde_api():
+    print("Cargando citas desde la API...")  # Mensaje de depuración
+    global citas_reservadas
+    citas_reservadas = []
+    page = 1
+
     try:
-        response = requests.get(API_URL)
-        if response.status_code == 200:
-            global citas_reservadas
-            citas_reservadas = response.json()
-            print("Citas cargadas exitosamente desde la API")
-        else:
-            print(f"Error al cargar citas desde la API: {response.status_code}, {response.text}")
+        while True:
+            response = requests.get(f'{API_URL}?page={page}')
+            if response.status_code == 200:
+                data = response.json()
+                citas_reservadas.extend([
+                    {
+                        "id": cita.get("id"),
+                        "name": cita.get("name"),
+                        "telephone": cita.get("telephone"),
+                        "date": datetime.strptime(cita.get("date"), '%Y-%m-%dT%H:%M:%S'),  # Ajuste aquí
+                        "time": time_to_int(cita.get("time")),  # Guardar la hora como número
+                        "fecha_registro": datetime.strptime(cita.get("fecha_registro"), '%Y-%m-%dT%H:%M:%S') if cita.get("fecha_registro") else None,
+                        "dias_para_cita": cita.get("dias_para_cita")
+                    }
+                    for cita in data['usuarios']
+                ])
+                if page >= data['pages']:
+                    break
+                page += 1
+            else:
+                print(f"Error al cargar citas desde la API: {response.status_code}, {response.text}")
+                break
+        print("Citas cargadas exitosamente desde la API")
+        imprimir_citas_reservadas()  # Llamar a la función de depuración
     except Exception as e:
         print(f"Excepción al cargar citas desde la API: {e}")
+
+def imprimir_citas_reservadas():
+    """Función para imprimir todas las citas reservadas."""
+    if not citas_reservadas:
+        print("No hay citas reservadas.")
+    else:
+        print("Citas reservadas:")  # Añadir encabezado para la salida
+        for cita in citas_reservadas:
+            print(f"ID: {cita['id']}, Nombre: {cita['name']}, Teléfono: {cita['telephone']}, Fecha: {cita['date']}, Hora: {cita['time']}, Fecha de Registro: {cita['fecha_registro']}, Días para la Cita: {cita['dias_para_cita']}")
 
 @app.before_request
 def before_request():
@@ -394,6 +431,7 @@ def select_save_cita(to_number, date, time):
 
     name = usuario_info[to_number]["name"]
     cita_datetime = datetime.combine(date, datetime.strptime(time, "%I:%M %p").time())
+    
     citas_reservadas.append({"date": cita_datetime, "time": time, "name": name})
 
     time_24hr = datetime.strptime(time, "%I:%M %p").strftime("%H:%M:%S")
@@ -401,16 +439,15 @@ def select_save_cita(to_number, date, time):
     datos = {
         "name": name,
         "telephone": to_number,  # Número de teléfono como cadena
-        "date": date.isoformat().split('T')[0],  # Solo la parte de la fecha
+        "date": cita_datetime.strftime('%Y-%m-%d %H:%M:%S'),  # Fecha y hora en formato local
         "time": time_24hr
     }
 
-    send_response(to_number, f"Sending data: {datos}")  # Imprimir los datos para debugging
+    send_response(to_number, f"Enviando datos: {datos}")  # Imprimir los datos para debugging
 
     try:
         response = requests.post('https://botwhatsappapi-production.up.railway.app/usuarios', json=datos)
         
-        # Comprobar si la respuesta es exitosa
         if response.status_code in [200, 201]:
             send_response(to_number, 'Datos enviados correctamente')
             send_response(to_number, f"¡Gracias {name}! Tu cita para el {date} a las {time} ha sido agendada.")
@@ -434,41 +471,66 @@ def delete_cita(to_number, cita_datetime):
         date_str = cita_datetime.strftime('%Y-%m-%d')
         time_str = cita_datetime.strftime('%H:%M:%S')
 
-        # Crear los datos para la solicitud GET
-        params = {
-            "telephone": to_number,
-            "date": date_str,
-            "time": time_str
-        }
+        # Variables para el manejo de la paginación
+        page = 1
+        found = False
 
-        # Realizar la solicitud GET a la API para buscar el usuario
-        response = requests.get('https://botwhatsappapi-production.up.railway.app/usuarios', params=params)
-        
-        # Comprobar si la solicitud fue exitosa
-        if response.status_code == 200:
-            usuarios = response.json().get('usuarios', [])
+        # Iterar a través de todas las páginas
+        while True:
+            # Crear los datos para la solicitud GET
+            params = {
+                "telephone": to_number,
+                "page": page
+            }
+
+            # Realizar la solicitud GET a la API para buscar el usuario
+            response = requests.get('https://botwhatsappapi-production.up.railway.app/usuarios', params=params)
             
-            if usuarios:
-                # Asumiendo que solo hay un usuario que coincide con los criterios
-                usuario = usuarios[0]
-                user_id = usuario['id']
+            # Comprobar si la solicitud fue exitosa
+            if response.status_code == 200:
+                data = response.json()
+                usuarios = data.get('usuarios', [])
                 
-                # Realizar la solicitud DELETE a la API con el ID del usuario
-                delete_response = requests.delete(f'https://botwhatsappapi-production.up.railway.app/usuario/{user_id}')
+                # Depuración: imprimir datos recibidos y valores buscados
+                print(f"Usuarios recibidos (Página {page}): {usuarios}")
+                print(f"Buscando cita con teléfono: {to_number}, fecha: {date_str}, hora: {time_str}")
+
+                # Filtrar las citas para encontrar una que coincida exactamente con la fecha y hora
+                usuario = next((u for u in usuarios if u['telephone'] == to_number and u['date'].startswith(date_str) and u['time'] == time_str), None)
                 
-                if delete_response.status_code == 204:
-                    response_text = f"Cita para el {cita_datetime.strftime('%d de %B a las %H:%M')} eliminada."
-                    send_response(to_number, response_text)
+                if usuario:
+                    user_id = usuario['id']
+                    
+                    # Realizar la solicitud DELETE a la API con el ID del usuario
+                    delete_response = requests.delete(f'https://botwhatsappapi-production.up.railway.app/usuario/{user_id}')
+                    
+                    if delete_response.status_code == 204:
+                        response_text = f"Cita para el {cita_datetime.strftime('%d de %B a las %H:%M')} eliminada."
+                        send_response(to_number, response_text)
+                    else:
+                        send_response(to_number, f'Error al eliminar la cita: {delete_response.status_code} - {delete_response.text}')
+                    found = True
+                    break
                 else:
-                    send_response(to_number, f'Error al eliminar la cita: {delete_response.status_code} - {delete_response.text}')
+                    print(f"No se encontró una cita que coincida en la página {page}.")
+                
+                # Verificar si hay más páginas
+                if page >= data.get('pages', 1):
+                    break
+                page += 1
             else:
-                send_response(to_number, 'No se encontró una cita que coincida con los detalles proporcionados.')
-        else:
-            send_response(to_number, f'Error al buscar la cita: {response.status_code} - {response.text}')
+                print(f'Error al buscar la cita: {response.status_code} - {response.text}')
+                send_response(to_number, f'Error al buscar la cita: {response.status_code} - {response.text}')
+                return
+
+        if not found:
+            send_response(to_number, 'No se encontró una cita que coincida con los detalles proporcionados.')
 
     except requests.exceptions.RequestException as e:
+        print(f'Ocurrió un error al realizar la solicitud: {e}')
         send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
     except Exception as e:
+        print(f'Ocurrió un error inesperado: {e}')
         send_response(to_number, f'Ocurrió un error inesperado: {e}')
 
 def get_next_available_appointment(start_hour=11, end_hour=20):
@@ -477,23 +539,24 @@ def get_next_available_appointment(start_hour=11, end_hour=20):
 
     appointment_duration = timedelta(hours=1)
 
-    # Encuentra la próxima hora de cita disponible
     while True:
         if appointment_date.hour >= end_hour:
-            # Si es después del horario de citas, pasa al siguiente día
             appointment_date += timedelta(days=1)
             appointment_date = appointment_date.replace(hour=start_hour, minute=0, second=0, microsecond=0)
         elif appointment_date.hour < start_hour:
-            # Si es antes del horario de citas, establece la hora de inicio
             appointment_date = appointment_date.replace(hour=start_hour, minute=0, second=0, microsecond=0)
         else:
-            # Incrementa una hora hasta encontrar una cita disponible
             appointment_date = appointment_date.replace(minute=0, second=0, microsecond=0)
-            if all(r_cita["date"] != appointment_date for r_cita in citas_reservadas) and appointment_date > now:
+            
+            date_str = appointment_date.strftime('%Y-%m-%d')
+            time_int = appointment_date.hour * 100 + appointment_date.minute
+
+            if all(r_cita["date"].strftime('%Y-%m-%d') != date_str or r_cita["time"] != time_int for r_cita in citas_reservadas) and appointment_date > now:
                 break
             appointment_date += appointment_duration
 
     return appointment_date
+    
 
 def mostrar_citas_reservadas(to_number):
     try:
