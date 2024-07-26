@@ -11,6 +11,22 @@ app = Flask(__name__)
 API_KEY = 'o6botgtule9omsamb70z42udlyzp3cql'  # Reemplaza con tu clave API de Gupshup
 SOURCE_NUMBER = '5216675014303'  # Reemplaza con tu número registrado en Gupshup
 
+# Diccionario de traducción de los nombres de los meses
+month_translation = {
+    'January': 'enero',
+    'February': 'febrero',
+    'March': 'marzo',
+    'April': 'abril',
+    'May': 'mayo',
+    'June': 'junio',
+    'July': 'julio',
+    'August': 'agosto',
+    'September': 'septiembre',
+    'October': 'octubre',
+    'November': 'noviembre',
+    'December': 'diciembre'
+}
+
 # Lista para almacenar las citas reservadas
 citas_reservadas = []
 
@@ -20,60 +36,6 @@ usuario_info = {}
 cita = False
 
 API_URL = 'https://botwhatsappapi-production.up.railway.app/usuarios'
-
-def time_to_int(time_str):
-    """Convert time in HH:MM:SS format to integer HHMM."""
-    time_obj = datetime.strptime(time_str, '%H:%M:%S').time()
-    return time_obj.hour * 100 + time_obj.minute
-
-def cargar_citas_desde_api():
-    print("Cargando citas desde la API...")  # Mensaje de depuración
-    global citas_reservadas
-    citas_reservadas = []
-    page = 1
-
-    try:
-        while True:
-            response = requests.get(f'{API_URL}?page={page}')
-            if response.status_code == 200:
-                data = response.json()
-                citas_reservadas.extend([
-                    {
-                        "id": cita.get("id"),
-                        "name": cita.get("name"),
-                        "telephone": cita.get("telephone"),
-                        "date": datetime.strptime(cita.get("date"), '%Y-%m-%dT%H:%M:%S'),  # Ajuste aquí
-                        "time": time_to_int(cita.get("time")),  # Guardar la hora como número
-                        "fecha_registro": datetime.strptime(cita.get("fecha_registro"), '%Y-%m-%dT%H:%M:%S') if cita.get("fecha_registro") else None,
-                        "dias_para_cita": cita.get("dias_para_cita")
-                    }
-                    for cita in data['usuarios']
-                ])
-                if page >= data['pages']:
-                    break
-                page += 1
-            else:
-                print(f"Error al cargar citas desde la API: {response.status_code}, {response.text}")
-                break
-        print("Citas cargadas exitosamente desde la API")
-        imprimir_citas_reservadas()  # Llamar a la función de depuración
-    except Exception as e:
-        print(f"Excepción al cargar citas desde la API: {e}")
-
-def imprimir_citas_reservadas():
-    """Función para imprimir todas las citas reservadas."""
-    if not citas_reservadas:
-        print("No hay citas reservadas.")
-    else:
-        print("Citas reservadas:")  # Añadir encabezado para la salida
-        for cita in citas_reservadas:
-            print(f"ID: {cita['id']}, Nombre: {cita['name']}, Teléfono: {cita['telephone']}, Fecha: {cita['date']}, Hora: {cita['time']}, Fecha de Registro: {cita['fecha_registro']}, Días para la Cita: {cita['dias_para_cita']}")
-
-@app.before_request
-def before_request():
-    if not hasattr(app, 'before_first_request_handled'):
-        cargar_citas_desde_api()
-        app.before_first_request_handled = True
 
 @app.route('/', methods=['GET'])
 def home():
@@ -99,6 +61,11 @@ def set_cita_state(state):
     global cita
     cita = state
 
+def convert_date_format(date_str):
+    """
+    Convierte una fecha del formato DD-MM-YYYY al formato YYYY-MM-DD.
+    """
+    return datetime.strptime(date_str, '%d-%m-%Y').date()
 
 
 def handle_message(payload):
@@ -167,7 +134,7 @@ def handle_postback(payload):
 def send_welcome_message(to_number):
     welcome_text = "¡Bienvenido! ¿Qué deseas hacer?"
     options = [
-        {"title": "Agendar Cita", "postbackText": "cita"},
+        {"title": "Agendar cita", "postbackText": "cita"},
         {"title": "Consultar", "postbackText": "mostrar_citas"},
         {"title": "Contacto", "postbackText": "contacto"}
     ]
@@ -193,6 +160,7 @@ def send_response_consultar(to_number):
     send_quick_reply_message(to_number, options)
 
 def send_consultar_cita(to_number):
+    set_cita_state(False)
     try:
         citas_reservadas = []
         page = 1
@@ -219,7 +187,6 @@ def send_consultar_cita(to_number):
                 send_response(to_number, f'Error al obtener citas: {response.status_code} - {response.text}')
                 return
 
-        # Filtrar las citas para el número de teléfono dado y que sean futuras
         citas_proximas = []
         for cita in citas_reservadas:
             if cita['telephone'] == to_number:
@@ -231,9 +198,13 @@ def send_consultar_cita(to_number):
         if citas_proximas:
             response_text = "Citas próximas:\n"
             for cita in citas_proximas:
-                # Formatear la fecha y hora a texto
+                # Formatear la fecha y hora a texto en el formato DD-MM-YYYY
                 cita_datetime = datetime.strptime(cita['date'], '%Y-%m-%dT%H:%M:%S')
-                date_str = cita_datetime.strftime('%d de %B a las %I:%M %p')
+                day = cita_datetime.strftime('%d')
+                month = month_translation[cita_datetime.strftime('%B')]
+                year = cita_datetime.strftime('%Y')
+                time = cita_datetime.strftime('%I:%M %p')
+                date_str = f"{day} de {month} a las {time}"
                 response_text += f"- {date_str} para {cita['name']}\n"
         else:
             response_text = "No tienes citas próximas registradas."
@@ -257,7 +228,8 @@ def add_cita(to_number):
     usuario_info[to_number]["date"] = next_appointment.date()
     usuario_info[to_number]["time"] = next_appointment.strftime('%I:%M %p')
 
-    response_text = f"La cita más próxima es el {next_appointment.strftime('%d de %B a las %I:%M %p')}. ¿Deseas agendarla?"
+    month_spanish = month_translation[next_appointment.strftime('%B')]
+    response_text = f"La cita más próxima es el {next_appointment.strftime(f'%d de {month_spanish} a las %I:%M %p')}. ¿Deseas agendarla?"
     options = [
         {"title": "Sí", "postbackText": "add_cita"},
         {"title": "Deseo otra fecha", "postbackText": "otra_fecha"},
@@ -321,7 +293,8 @@ def check_hours(to_number, title):
     usuario_info[to_number]["date"] = next_appointment.date()
     usuario_info[to_number]["time"] = next_appointment.strftime('%I:%M %p')
 
-    response_text = f"La cita más próxima es el {next_appointment.strftime('%d de %B a las %I:%M %p')}. ¿Deseas agendarla?"
+    month_spanish = month_translation[next_appointment.strftime('%B')]
+    response_text = f"La cita más próxima es el {next_appointment.strftime(f'%d de {month_spanish} a las %I:%M %p')}. ¿Deseas agendarla?"
 
     options = [
         {"title": "Sí", "postbackText": "add_cita"},
@@ -331,8 +304,43 @@ def check_hours(to_number, title):
 
     send_quick_reply_message(to_number, options, response_text)
 
+def get_all_citas():
+    citas_reservadas = []
+    page = 1
+    while True:
+        response = requests.get(API_URL, params={'page': page})
+        try:
+            data = response.json()
+            # Suponiendo que la respuesta tiene una clave 'usuarios' que contiene la lista de citas
+            citas = data.get('usuarios', [])
+            if not isinstance(citas, list):
+                raise ValueError("La respuesta de la API no contiene una lista en 'usuarios'")
+            if not citas:
+                break
+            citas_reservadas.extend(citas)
+            page += 1
+        except ValueError as e:
+            print(f"Error al decodificar la respuesta JSON: {e}")
+            break
+        except KeyError as e:
+            print(f"Error procesando la respuesta: {e}")
+            break
+
+    return citas_reservadas
+
 def get_booked_hours(date):
-    return [cita["date"].strftime('%I:%M %p') for cita in citas_reservadas if cita["date"].date() == date]
+    citas_reservadas = get_all_citas()
+    booked_hours = []
+    for cita in citas_reservadas:
+        try:
+            cita_date = datetime.fromisoformat(cita["date"]).date()
+            if cita_date == date:
+                cita_time = datetime.strptime(cita["time"], '%H:%M:%S').time()
+                booked_hours.append(datetime.combine(cita_date, cita_time).strftime('%I:%M %p'))
+        except (KeyError, ValueError) as e:
+            print(f"Error procesando la cita: {e}")
+    
+    return booked_hours
 
 def get_next_available_days(start_date, num_days=3):
     available_days = []
@@ -349,9 +357,26 @@ def get_next_available_days(start_date, num_days=3):
 def select_date(to_number):
     set_cita_state(True)
     
-    send_response(to_number, "Indica la fecha de la cita que deseas agendar en el formato 'YYYY-MM-DD'.")
+    send_response(to_number, "Indica la fecha de la cita que deseas agendar en el formato 'DD-MM-YYYY'. Ejemplo: 26-03-2025.")
 
-def select_add_cita(to_number, date):
+def select_add_cita(to_number, date_str):
+
+    date = convert_date_format(date_str)
+
+    now = datetime.now().date()
+    max_date = now + timedelta(days=60)  # Dos meses a partir de hoy
+
+    if date < now:
+        send_response(to_number, f"No puedes seleccionar esta fecha: {date_str}. Por favor, selecciona una fecha futura. Indica la fecha de la cita que deseas agendar en el formato 'DD-MM-YYYY'. Ejemplo: 26-03-2025.")
+        set_cita_state(True)
+        return
+
+    if date > max_date:
+        send_response(to_number, f"No puedes seleccionar esta fecha: {date_str}. Por favor, selecciona una fecha dentro de los próximos 60 días. Indica la fecha de la cita que deseas agendar en el formato 'DD-MM-YYYY'. Ejemplo: 26-03-2025.")
+        set_cita_state(True)
+        return
+
+
     response_text = "El día {} está disponible, por favor selecciona la hora"
     booked_hours = get_booked_hours(date)
 
@@ -450,20 +475,25 @@ def select_save_cita(to_number, date, time):
         
         if response.status_code in [200, 201]:
             send_response(to_number, 'Datos enviados correctamente')
-            send_response(to_number, f"¡Gracias {name}! Tu cita para el {date} a las {time} ha sido agendada.")
+            name_capitalized = name.capitalize()
+
+            send_response(to_number, f"¡Gracias {name_capitalized}! Tu cita para el {date} a las {time} ha sido agendada.")
             send_welcome_message(to_number)
         else:
             send_response(to_number, f'Error al enviar datos: {response.status_code} - {response.text}')
+            send_welcome_message(to_number)
         
     except requests.exceptions.RequestException as e:
         send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
+        send_welcome_message(to_number)
     except Exception as e:
         send_response(to_number, f'Ocurrió un error inesperado: {e}')
+        send_welcome_message(to_number)
 
     usuario_info.pop(to_number, None)
 
 def cancel_cita(to_number):
-    send_response(to_number, "Indica la fecha y hora de la cita que deseas cancelar.")
+    send_response(to_number, "Indica la fecha y hora de la cita que deseas cancelar. Utiliza el formato 'YYYY-MM-DD HH:MM:SS'. Ejemplo: 2025-03-26 15:00:00.")
 
 def delete_cita(to_number, cita_datetime):
     try:
@@ -505,14 +535,17 @@ def delete_cita(to_number, cita_datetime):
                     delete_response = requests.delete(f'https://botwhatsappapi-production.up.railway.app/usuario/{user_id}')
                     
                     if delete_response.status_code == 204:
-                        response_text = f"Cita para el {cita_datetime.strftime('%d de %B a las %H:%M')} eliminada."
+                        month_spanish = month_translation[cita_datetime.strftime('%B')]
+                        response_text = f"Cita para el {cita_datetime.strftime(f'%d de {month_spanish} a las %H:%M')} eliminada."
                         send_response(to_number, response_text)
                     else:
                         send_response(to_number, f'Error al eliminar la cita: {delete_response.status_code} - {delete_response.text}')
+                        send_welcome_message(to_number)
                     found = True
                     break
                 else:
-                    print(f"No se encontró una cita que coincida en la página {page}.")
+                    print(f"No se encontró una cita que coincida en la página {page}. Por favor, intenta de nuevo.")
+                    set_cita_state(True)
                 
                 # Verificar si hay más páginas
                 if page >= data.get('pages', 1):
@@ -521,17 +554,21 @@ def delete_cita(to_number, cita_datetime):
             else:
                 print(f'Error al buscar la cita: {response.status_code} - {response.text}')
                 send_response(to_number, f'Error al buscar la cita: {response.status_code} - {response.text}')
+                send_welcome_message(to_number)
                 return
 
         if not found:
             send_response(to_number, 'No se encontró una cita que coincida con los detalles proporcionados.')
+            send_welcome_message(to_number)
 
     except requests.exceptions.RequestException as e:
         print(f'Ocurrió un error al realizar la solicitud: {e}')
         send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
+        send_welcome_message(to_number)
     except Exception as e:
         print(f'Ocurrió un error inesperado: {e}')
         send_response(to_number, f'Ocurrió un error inesperado: {e}')
+        send_welcome_message(to_number)
 
 def get_next_available_appointment(start_hour=11, end_hour=20):
     now = datetime.now()
@@ -582,6 +619,7 @@ def mostrar_citas_reservadas(to_number):
                 page += 1
             else:
                 send_response(to_number, f'Error al obtener citas: {response.status_code} - {response.text}')
+                send_welcome_message(to_number)
                 return
 
         # Imprimir la respuesta para depuración
@@ -597,15 +635,19 @@ def mostrar_citas_reservadas(to_number):
                     response_text += f"- {date_str} para {cita['name']}\n"
                 else:
                     response_text += "Datos incompletos en una cita reservada.\n"
+                    send_welcome_message(to_number)
         else:
             response_text = "No hay citas reservadas."
+            send_welcome_message(to_number)
 
         send_response(to_number, response_text)
 
     except requests.exceptions.RequestException as e:
         send_response(to_number, f'Ocurrió un error al realizar la solicitud: {e}')
+        send_welcome_message(to_number)
     except Exception as e:
         send_response(to_number, f'Ocurrió un error inesperado: {e}')
+        send_welcome_message(to_number)
 
 
 def contact_menu(to_number):
